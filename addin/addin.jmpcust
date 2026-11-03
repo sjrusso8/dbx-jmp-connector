@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<jm:menu_and_toolbar_customizations xmlns:jm="http://www.jmp.com/ns/menu" version="3">
+  <jm:insert_in_main_menu>
+    <jm:insert_in_menu>
+      <jm:name>ADD-INS</jm:name>
+      <jm:insert_after>
+        <jm:name></jm:name>
+        <jm:command>
+          <jm:name>DATABRICKS_CONNECTOR</jm:name>
+          <jm:caption>Databricks Connector…</jm:caption>
+          <jm:action type="text">Include("$ADDIN_HOME(com.databricks.jmp.connector)/databricks_connector.jsl");</jm:action>
+          <jm:icon type="None"></jm:icon>
+        </jm:command>
+      </jm:insert_after>
+    </jm:insert_in_menu>
+  </jm:insert_in_main_menu>
+</jm:menu_and_toolbar_customizations>

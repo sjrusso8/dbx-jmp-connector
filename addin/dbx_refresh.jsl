@@ -1,0 +1,28 @@
+// "Refresh from Databricks" table script: re-run the saved query into this data table.
+// The query runs first; rows are replaced only if it succeeds, so a failed refresh never loses data.
+Names Default To Here( 1 );
+Include( "dbx_common.jsl" );
+
+dt = Current Data Table();
+If( !dbx:ensurePython( 0 ), Stop() );
+
+args = Associative Array();
+args["table"] = dt << Get Name;
+args["host"] = dt << Get Table Variable( "Databricks Host" );
+args["warehouse_id"] = dt << Get Table Variable( "Databricks Warehouse" );
+args["sql"] = dt << Get Table Variable( "Databricks Source" );
+args["sign_in"] = dt << Get Table Variable( "Databricks Sign-in" );
+
+r = dbx:call( "refresh_table", args );
+If( Is Empty( r ),
+	answer = New Window( "Refresh from Databricks", <<Modal,
+		Text Box( "This table couldn't be refreshed. Its data was not changed.", <<Set Font Style( "Bold" ) ),
+		Text Box( dbx:lastError, <<Set Wrap( 460 ) ),
+		Text Box( "If your sign-in expired, sign in again, then run Refresh from Databricks again.", <<Set Wrap( 460 ) ),
+		H List Box( Button Box( "Sign in…" ), Button Box( "Cancel" ) )
+	);
+	If( answer["Button"] == 1, Include( "databricks_connector.jsl" ) );
+,
+	dbx:finishTable( dt, r );
+	Write( "\!nDatabricks Connector: refreshed " || Char( r["rows"] ) || " rows into " || r["table"] );
+);

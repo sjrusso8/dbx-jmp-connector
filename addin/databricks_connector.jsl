@@ -1,0 +1,492 @@
+// Databricks Connector for JMP: sign in, then import a table (Select data) or a query (Write SQL).
+// UI is JSL; all Databricks calls go through dbx_jmp.py (Databricks SDK for Python).
+Names Default To Here( 1 );
+
+Include( "dbx_common.jsl" );
+If( !dbx:ensurePython( 1 ), Stop() );
+
+// ---------------------------------------------------------------- helpers
+
+dbx:selected = Function( {lb}, {s},
+	s = lb << Get Selected;
+	If( Is List( s ), If( N Items( s ), s[1], "" ), s );
+);
+
+dbx:label = Function( {txt}, Text Box( txt, <<Set Width( 110 ), <<Text Color( dbx:muted ) ) );
+
+dbx:heading = Function( {txt}, Text Box( txt, <<Set Font Size( 13 ), <<Set Font Style( "Bold" ) ) );
+
+dbx:hint = Function( {txt}, Text Box( txt, <<Text Color( dbx:muted ) ) );
+
+dbx:colHeader = Function( {txt}, Text Box( txt, <<Set Font Style( "Bold" ), <<Text Color( dbx:muted ) ) );
+
+dbx:typeNames = {"Auto", "Number", "Text", "Date", "Datetime"};
+dbx:opNames = {"=", "≠", ">", "≥", "<", "≤", "contains", "starts with", "in list", "is empty", "is not empty"};
+
+// ---------------------------------------------------------------- sign in
+
+dbx:onMethod = Function( {}, {m},
+	m = dbx:method << Get;
+	dbx:profileRow << Visibility( If( m == 1, "Visible", "Collapse" ) );
+	dbx:hostRow << Visibility( If( m > 1, "Visible", "Collapse" ) );
+	dbx:tokenRow << Visibility( If( m == 3, "Visible", "Collapse" ) );
+);
+
+// Show the selected profile's host under the combo (combo items are names only, so it stays narrow).
+dbx:onProfile = Function( {},
+	If( N Items( dbx:profiles ) & !Is Empty( dbx:profileHost ),
+		dbx:profileHost << Set Text( Substitute( dbx:profiles[dbx:profile << Get]["host"], "https://", "" ) )
+	);
+);
+
+dbx:showScreen = Function( {main},
+	dbx:loginScreen << Visibility( If( main, "Collapse", "Visible" ) );
+	dbx:mainScreen << Visibility( If( main, "Visible", "Collapse" ) );
+);
+
+dbx:connect = Function( {}, {m, args, r, wh},
+	m = dbx:method << Get;
+	args = Associative Array(); // ["k" => v] literals don't evaluate v, so assign keys explicitly
+	args["method"] = {"profile", "oauth", "pat"}[m];
+	If( m == 1,
+		If( !N Items( dbx:profiles ), dbx:setStatus( "No workspace profiles found in ~/.databrickscfg.", 1 ); Return() );
+		args["profile"] = dbx:profiles[dbx:profile << Get]["name"],
+		args["host"] = Trim( dbx:host << Get Text )
+	);
+	If( m == 3, args["token"] = dbx:token << Get Text );
+	dbx:setStatus( If( m == 2, "Complete sign-in in your browser…", "Connecting…" ) );
+	r = dbx:call( "connect", args );
+	If( Is Empty( r ), Return() );
+	dbx:token << Set Text( "" ); // the SDK client holds the token now; don't leave it in the window
+	dbx:hostUrl = r["host"];
+	dbx:signIn = If( m == 1, "profile:" || args["profile"], args["method"] ); // saved with tables; never a secret
+	dbx:connText << Set Text( "●  " || r["user"] || "\!n    " || Substitute( r["host"], "https://", "" ) );
+
+	wh = dbx:call( "warehouses" );
+	If( Is Empty( wh ), Return() );
+	dbx:whIds = Transform Each( {w}, wh, w["id"] );
+	dbx:warehouse << Set Items( Transform Each( {w}, wh, w["name"] || "  (" || w["state"] || ")" ) );
+
+	dbx:catalogs << Set Items( {} );
+	dbx:schemas << Set Items( {} );
+	dbx:tables << Set Items( {} );
+	dbx:clearTable();
+	dbx:setStatus( "Loading catalogs…" );
+	r = dbx:call( "catalogs" );
+	If( Is Empty( r ), Return() );
+	dbx:catalogs << Set Items( r );
+	dbx:showScreen( 1 );
+	dbx:setStatus( "Connected. Pick a table, or switch to Write SQL." );
+);
+
+dbx:disconnect = Function( {},
+	dbx:call( "disconnect" );
+	dbx:connText << Set Text( "○  Not connected" );
+	dbx:showScreen( 0 );
+	dbx:setStatus( "Choose how to sign in, then click Sign in." );
+);
+
+// ---------------------------------------------------------------- catalog explorer
+
+dbx:onCatalog = Function( {}, {c, r},
+	c = dbx:selected( dbx:catalogs );
+	dbx:schemas << Set Items( {} );
+	dbx:tables << Set Items( {} );
+	dbx:clearTable();
+	If( c == "", Return() );
+	dbx:setStatus( "Loading schemas in " || c || "…" );
+	r = dbx:call( "schemas", Associative Array( {"catalog"}, Eval List( {c} ) ) );
+	If( !Is Empty( r ), dbx:schemas << Set Items( r ); dbx:setStatus( "" ) );
+);
+
+dbx:onSchema = Function( {}, {c, s, r},
+	c = dbx:selected( dbx:catalogs );
+	s = dbx:selected( dbx:schemas );
+	dbx:tables << Set Items( {} );
+	dbx:clearTable();
+	If( s == "", Return() );
+	dbx:setStatus( "Loading tables in " || c || "." || s || "…" );
+	r = dbx:call( "tables", Associative Array( {"catalog", "schema"}, Eval List( {c, s} ) ) );
+	If( !Is Empty( r ),
+		dbx:tables << Set Items( r );
+		dbx:setStatus( Char( N Items( r ) ) || " tables in " || c || "." || s );
+	);
+);
+
+dbx:onTable = Function( {}, {t, r, cols},
+	t = dbx:selected( dbx:tables );
+	dbx:clearTable();
+	If( t == "", Return() );
+	dbx:fullName = dbx:selected( dbx:catalogs ) || "." || dbx:selected( dbx:schemas ) || "." || t;
+	dbx:setStatus( "Loading " || dbx:fullName || "…" );
+	r = dbx:call( "table", Associative Array( {"full_name"}, Eval List( {dbx:fullName} ) ) );
+	If( Is Empty( r ), dbx:fullName = ""; Return() );
+	cols = r["columns"];
+	// One row per column: {name, source type, include, import as, rename to}
+	dbx:cols = Transform Each( {c}, cols, Eval List( {c["name"], c["type"], 1, "Auto", ""} ) );
+	dbx:tableName << Set Text( dbx:fullName );
+	dbx:tableMeta << Set Text(
+		r["type"] || "   ·   " || Char( N Items( cols ) ) || " columns" || If( r["owner"] != "", "   ·   Owner: " || r["owner"], "" )
+		|| If( r["comment"] != "", "\!n" || r["comment"], "" )
+	);
+	dbx:renderCols();
+	dbx:renderFilters();
+	dbx:setStatus( "Choose columns and filters, then Preview or Import." );
+);
+
+dbx:clearTable = Function( {},
+	dbx:fullName = "";
+	dbx:cols = {};
+	dbx:filters = {};
+	dbx:tableName << Set Text( "No table selected" );
+	dbx:tableMeta << Set Text( "Pick a catalog, schema, and table on the left." );
+	dbx:renderCols();
+	dbx:renderFilters();
+);
+
+// ---------------------------------------------------------------- columns editor
+
+dbx:renderCols = Function( {}, {grid, i, row, inc, asB, alias},
+	dbx:incW = {};
+	dbx:asW = {};
+	dbx:aliasW = {};
+	grid = Lineup Box( N Col( 6 ), Spacing( 12, 2 ) );
+	If( N Items( dbx:cols ),
+		grid << Append( dbx:colHeader( "Include" ) );
+		grid << Append( dbx:colHeader( "Column" ) );
+		grid << Append( dbx:colHeader( "Databricks type" ) );
+		grid << Append( dbx:colHeader( "Import as" ) );
+		grid << Append( dbx:colHeader( "Rename to" ) );
+		grid << Append( dbx:colHeader( "Order" ) );
+	);
+	For( i = 1, i <= N Items( dbx:cols ), i++,
+		row = dbx:cols[i];
+		inc = Check Box( {""} );
+		inc << Set( 1, row[3] );
+		asB = Combo Box( dbx:typeNames );
+		asB << Set( Max( 1, Contains( dbx:typeNames, row[4] ) ) );
+		alias = Text Edit Box( row[5], <<Set Width( 150 ), <<Set Hint( row[1] ) );
+		Insert Into( dbx:incW, inc );
+		Insert Into( dbx:asW, asB );
+		Insert Into( dbx:aliasW, alias );
+		grid << Append( inc );
+		grid << Append( Text Box( row[1] ) );
+		grid << Append( Text Box( row[2], <<Text Color( dbx:muted ) ) );
+		grid << Append( asB );
+		grid << Append( alias );
+		grid << Append(
+			Eval( Substitute( Expr( H List Box( Button Box( "▲", dbx:moveCol( III, -1 ) ), Button Box( "▼", dbx:moveCol( III, 1 ) ) ) ), Expr( III ), i ) )
+		);
+	);
+	dbx:colsGrid << Delete Box();
+	dbx:colsHost << Append( dbx:colsGrid = grid );
+);
+
+// Read the widgets back into dbx:cols before anything re-renders or builds SQL.
+dbx:syncCols = Function( {}, {i, row},
+	For( i = 1, i <= N Items( dbx:cols ), i++,
+		row = dbx:cols[i];
+		dbx:cols[i] = Eval List( {row[1], row[2], dbx:incW[i] << Get( 1 ), dbx:typeNames[dbx:asW[i] << Get], dbx:aliasW[i] << Get Text} );
+	)
+);
+
+dbx:moveCol = Function( {i, d}, {j, tmp},
+	j = i + d;
+	If( j < 1 | j > N Items( dbx:cols ), Return() );
+	dbx:syncCols();
+	dbx:syncFilters(); // filter combos store an index into the column order, so re-render them too
+	tmp = dbx:cols[i];
+	dbx:cols[i] = dbx:cols[j];
+	dbx:cols[j] = tmp;
+	dbx:renderCols();
+	dbx:renderFilters();
+);
+
+dbx:setAllCols = Function( {on}, {i, row},
+	dbx:syncCols();
+	For( i = 1, i <= N Items( dbx:cols ), i++,
+		row = dbx:cols[i];
+		row[3] = on;
+		dbx:cols[i] = row;
+	);
+	dbx:renderCols();
+);
+
+// ---------------------------------------------------------------- filters editor
+
+dbx:renderFilters = Function( {}, {grid, i, row, colB, opB, val, names},
+	dbx:fColW = {};
+	dbx:fOpW = {};
+	dbx:fValW = {};
+	names = Transform Each( {c}, dbx:cols, c[1] );
+	grid = Lineup Box( N Col( 4 ), Spacing( 10, 2 ) );
+	If( !N Items( dbx:filters ), grid << Append( dbx:hint( "No filters. All rows are imported, up to the row limit." ) ) );
+	For( i = 1, i <= N Items( dbx:filters ), i++,
+		row = dbx:filters[i];
+		colB = Combo Box( names );
+		colB << Set( Max( 1, Contains( names, row[1] ) ) );
+		opB = Combo Box( dbx:opNames );
+		opB << Set( Max( 1, Contains( dbx:opNames, row[2] ) ) );
+		val = Text Edit Box( row[3], <<Set Width( 220 ), <<Set Hint( "value (in list: a, b, c)" ) );
+		Insert Into( dbx:fColW, colB );
+		Insert Into( dbx:fOpW, opB );
+		Insert Into( dbx:fValW, val );
+		grid << Append( colB );
+		grid << Append( opB );
+		grid << Append( val );
+		grid << Append( Eval( Substitute( Expr( Button Box( "Remove", dbx:removeFilter( III ) ) ), Expr( III ), i ) ) );
+	);
+	dbx:filtGrid << Delete Box();
+	dbx:filtHost << Append( dbx:filtGrid = grid );
+);
+
+dbx:syncFilters = Function( {}, {i, names},
+	names = Transform Each( {c}, dbx:cols, c[1] );
+	For( i = 1, i <= N Items( dbx:filters ), i++,
+		dbx:filters[i] = Eval List( {names[dbx:fColW[i] << Get], dbx:opNames[dbx:fOpW[i] << Get], dbx:fValW[i] << Get Text} )
+	);
+);
+
+dbx:addFilter = Function( {},
+	If( !N Items( dbx:cols ), dbx:setStatus( "Select a table first.", 1 ); Return() );
+	dbx:syncFilters();
+	dbx:filters[N Items( dbx:filters ) + 1] = Eval List( {dbx:cols[1][1], "=", ""} );
+	dbx:renderFilters();
+);
+
+dbx:removeFilter = Function( {i},
+	dbx:syncFilters();
+	Remove From( dbx:filters, i );
+	dbx:renderFilters();
+);
+
+// ---------------------------------------------------------------- query, preview, import
+
+// The SQL for the active tab, capped at limit rows (0 = no cap). Returns {sql, table name} or Empty().
+dbx:currentQuery = Function( {limit}, {cols, filters, sql, name},
+	If( (dbx:tabs << Get Selected) == 1,
+		If( dbx:fullName == "", dbx:setStatus( "Select a table first.", 1 ); Return( Empty() ) );
+		dbx:syncCols();
+		dbx:syncFilters();
+		cols = {};
+		For Each( {row}, dbx:cols,
+			If( row[3], cols[N Items( cols ) + 1] = Associative Array( {"name", "as", "alias"}, Eval List( {row[1], row[4], row[5]} ) ) )
+		);
+		If( !N Items( cols ), dbx:setStatus( "Include at least one column.", 1 ); Return( Empty() ) );
+		filters = Transform Each( {f}, dbx:filters, Associative Array( {"column", "op", "value"}, f ) );
+		sql = dbx:call( "build_sql", Associative Array( {"full_name", "columns", "filters", "limit"}, Eval List( {dbx:fullName, cols, filters, limit} ) ) );
+		name = Words( dbx:fullName, "." )[3];
+	,
+		sql = Trim( dbx:sqlBox << Get Text );
+		If( sql == "", dbx:setStatus( "Write a SQL query first.", 1 ); Return( Empty() ) );
+		sql = dbx:call( "limit_sql", Associative Array( {"sql", "limit"}, Eval List( {sql, limit} ) ) );
+		name = Trim( dbx:queryName << Get Text );
+		If( name == "", name = "Databricks query" );
+	);
+	If( Is Empty( sql ), Return( Empty() ) );
+	dbx:sqlShown << Set Text( sql );
+	Eval List( {sql, name} );
+);
+
+dbx:warehouseId = Function( {},
+	If( !N Items( dbx:whIds ), dbx:setStatus( "No SQL warehouse available in this workspace.", 1 ); Return( Empty() ) );
+	dbx:whIds[dbx:warehouse << Get];
+);
+
+dbx:preview = Function( {}, {q, wh, p, tb, i, dbxPrev},
+	q = dbx:currentQuery( 100 ); // previews are always capped at 100 rows
+	wh = dbx:warehouseId();
+	If( Is Empty( q ) | Is Empty( wh ), Return() );
+	dbx:setStatus( "Running preview on " || dbx:selected( dbx:warehouse ) || "… (a stopped warehouse can take a minute to start)" );
+	p = dbx:call( "preview", Associative Array( {"warehouse_id", "sql"}, Eval List( {wh, q[1]} ) ) );
+	If( Is Empty( p ), Return() );
+	Python Submit( "dbxPrev = dbx_jmp.preview_values" );
+	dbxPrev = Python Get( dbxPrev ); // a list of string lists, one per column
+	tb = Table Box( <<Set Shade Alternate Rows( 1 ), <<Set Underline Headings( 1 ), <<Set Column Borders( 1 ) );
+	For( i = 1, i <= N Items( p["columns"] ), i++,
+		tb << Append( String Col Box( p["columns"][i], dbxPrev[i] ) )
+	);
+	dbx:prevGrid << Delete Box();
+	dbx:prevHost << Append( dbx:prevGrid = tb );
+	dbx:setStatus(
+		"Preview: " || Char( p["rows"] ) || " rows × " || Char( N Items( p["columns"] ) ) || " columns."
+	);
+);
+
+dbx:import = Function( {}, {q, wh, r, dt},
+	q = dbx:currentQuery( If( Is Missing( dbx:limit << Get ), 0, dbx:limit << Get ) );
+	wh = dbx:warehouseId();
+	If( Is Empty( q ) | Is Empty( wh ), Return() );
+	dbx:setStatus( "Running query on " || dbx:selected( dbx:warehouse ) || "… (a stopped warehouse can take a minute to start)" );
+	r = dbx:call( "import_query", Associative Array( {"warehouse_id", "sql", "name"}, Eval List( {wh, q[1], q[2]} ) ) );
+	If( Is Empty( r ), Return() );
+	dt = Data Table( r["table"] );
+	dbx:finishTable( dt, r );
+	// What a refresh needs. How you signed in is saved, never a token: PAT users sign in again to refresh.
+	dt << New Table Variable( "Databricks Source", q[1] );
+	dt << New Table Variable( "Databricks Host", dbx:hostUrl );
+	dt << New Table Variable( "Databricks Warehouse", wh );
+	dt << New Table Variable( "Databricks Sign-in", dbx:signIn );
+	dt << New Script( "Refresh from Databricks", Include( "$ADDIN_HOME(com.databricks.jmp.connector)/dbx_refresh.jsl" ) );
+	dbx:setStatus( "Imported " || Char( r["rows"] ) || " rows into data table \!"" || r["table"] || "\!"." );
+);
+
+// ---------------------------------------------------------------- window
+
+dbx:status = Empty();
+dbx:profiles = dbx:call( "profiles" );
+If( Is Empty( dbx:profiles ), dbx:profiles = {} );
+dbx:whIds = {};
+dbx:fullName = "";
+dbx:cols = {};
+dbx:filters = {};
+dbx:W = 1120; // content width
+
+dbx:win = New Window( "Databricks Connector",
+	Show Menu( 0 ),
+	Show Toolbars( 0 ),
+	V List Box(
+		// Header band
+		Border Box( Left( 20 ), Right( 20 ), Top( 14 ), Bottom( 14 ),
+			<<Set Background Color( dbx:navy ),
+			V List Box(
+				H List Box(
+					V List Box(
+						Text Box( "Databricks", <<Set Font Size( 18 ), <<Set Font Style( "Bold" ), <<Text Color( "White" ) ),
+						Text Box( "Bring Unity Catalog data into JMP", <<Text Color( RGB Color( 0.75, 0.8, 0.82 ) ) )
+					),
+					Spacer Box( Size( dbx:W - 620, 0 ) ),
+					dbx:connText = Text Box( "○  Not connected", <<Set Width( 380 ), <<Text Color( RGB Color( 0.75, 0.8, 0.82 ) ) )
+				),
+				Spacer Box( Size( dbx:W - 40, 0 ) )
+			)
+		),
+
+		// ---- Screen 1: sign in
+		dbx:loginScreen = Border Box( Left( (dbx:W - 560) / 2 ), Top( 30 ), Bottom( 30 ),
+			Border Box( Left( 28 ), Right( 28 ), Top( 24 ), Bottom( 24 ), Sides( 15 ), <<Set Color( dbx:muted ),
+				V List Box(
+					Text Box( "Connect to your Databricks workspace", <<Set Font Size( 16 ), <<Set Font Style( "Bold" ) ),
+					Spacer Box( Size( 0, 4 ) ),
+					Text Box( "Use a saved CLI profile, sign in with your browser, or paste a personal access token.", <<Set Wrap( 500 ), <<Text Color( dbx:muted ) ),
+					Spacer Box( Size( 0, 16 ) ),
+					H List Box(
+						dbx:label( "Sign in with" ),
+						dbx:method = Combo Box( {"Saved CLI profile", "Browser sign-in (OAuth)", "Personal access token"}, dbx:onMethod() )
+					),
+					Spacer Box( Size( 0, 6 ) ),
+					dbx:profileRow = H List Box(
+						dbx:label( "Profile" ),
+						V List Box(
+							dbx:profile = Combo Box(
+								If( N Items( dbx:profiles ),
+									Transform Each( {p}, dbx:profiles, p["name"] ),
+									{"(no profiles in ~/.databrickscfg)"}
+								),
+								dbx:onProfile()
+							),
+							dbx:profileHost = Text Box( "", <<Text Color( dbx:muted ) )
+						)
+					),
+					dbx:hostRow = H List Box(
+						dbx:label( "Workspace URL" ),
+						dbx:host = Text Edit Box( "", <<Set Width( 380 ), <<Set Hint( "e.g. mycompany.cloud.databricks.com" ) )
+					),
+					dbx:tokenRow = H List Box(
+						dbx:label( "Access token" ),
+						dbx:token = Text Edit Box( "", <<Password Style( 1 ), <<Set Width( 380 ), <<Set Hint( "dapi…" ) )
+					),
+					Spacer Box( Size( 0, 14 ) ),
+					H List Box( dbx:label( "" ), Button Box( "Sign in", dbx:connect() ) )
+				)
+			)
+		),
+
+		// ---- Screen 2: get data
+		dbx:mainScreen = Border Box( Left( 20 ), Right( 20 ), Top( 12 ),
+			V List Box(
+				H List Box(
+					dbx:label( "SQL warehouse" ),
+					dbx:warehouse = Combo Box( {} ),
+					Spacer Box( Size( 24, 0 ) ),
+					Button Box( "Switch workspace", dbx:disconnect() )
+				),
+				Spacer Box( Size( 0, 10 ) ),
+				dbx:tabs = Tab Box(
+					Tab Page Box( "Select data",
+						Border Box( Top( 10 ), Bottom( 6 ),
+							H List Box(
+								V List Box(
+									dbx:heading( "Catalog explorer" ),
+									Spacer Box( Size( 0, 6 ) ),
+									H List Box(
+										V List Box( dbx:label( "Catalog" ), dbx:catalogs = List Box( {}, width( 150 ), maxSelected( 1 ), nlines( 15 ), dbx:onCatalog() ) ),
+										Spacer Box( Size( 6, 0 ) ),
+										V List Box( dbx:label( "Schema" ), dbx:schemas = List Box( {}, width( 150 ), maxSelected( 1 ), nlines( 15 ), dbx:onSchema() ) ),
+										Spacer Box( Size( 6, 0 ) ),
+										V List Box( dbx:label( "Table" ), dbx:tables = List Box( {}, width( 170 ), maxSelected( 1 ), nlines( 15 ), dbx:onTable() ) )
+									)
+								),
+								Spacer Box( Size( 20, 0 ) ),
+								V List Box(
+									dbx:tableName = Text Box( "", <<Set Font Size( 13 ), <<Set Font Style( "Bold" ) ),
+									dbx:tableMeta = Text Box( "", <<Set Wrap( 560 ), <<Text Color( dbx:muted ) ),
+									Spacer Box( Size( 0, 8 ) ),
+									H List Box(
+										dbx:heading( "Columns" ),
+										Spacer Box( Size( 16, 0 ) ),
+										Button Box( "Select all", dbx:setAllCols( 1 ) ),
+										Button Box( "Select none", dbx:setAllCols( 0 ) )
+									),
+									Scroll Box( Size( 580, 170 ), dbx:colsHost = V List Box( dbx:colsGrid = Text Box( "" ) ) ),
+									Spacer Box( Size( 0, 8 ) ),
+									H List Box( dbx:heading( "Filters" ), Spacer Box( Size( 16, 0 ) ), Button Box( "+ Add filter", dbx:addFilter() ) ),
+									Scroll Box( Size( 580, 80 ), dbx:filtHost = V List Box( dbx:filtGrid = Text Box( "" ) ) )
+								)
+							)
+						)
+					),
+					Tab Page Box( "Write SQL",
+						Border Box( Top( 10 ), Bottom( 6 ),
+							V List Box(
+								H List Box(
+									dbx:label( "Query name" ),
+									dbx:queryName = Text Edit Box( "", <<Set Width( 320 ), <<Set Hint( "Name for the new data table" ) )
+								),
+								Spacer Box( Size( 0, 8 ) ),
+								dbx:sqlBox = Script Box( "SELECT *\!nFROM samples.nyctaxi.trips", "SQL", dbx:W - 60, 290 )
+							)
+						)
+					)
+				),
+				Spacer Box( Size( 0, 10 ) ),
+				H List Box(
+					dbx:label( "Row limit" ),
+					dbx:limit = Number Edit Box( 100000, 10 ),
+					dbx:hint( "   0 = all rows" ),
+					Spacer Box( Size( dbx:W - 560, 0 ) ),
+					Button Box( "Preview", dbx:preview() ),
+					Button Box( "Import into JMP", dbx:import() )
+				),
+				Spacer Box( Size( 0, 10 ) ),
+				H List Box( dbx:heading( "Preview" ), dbx:hint( "   first 100 rows" ) ),
+				dbx:sqlShown = Text Box( "", <<Set Wrap( dbx:W - 60 ), <<Text Color( dbx:muted ) ),
+				Scroll Box( Size( dbx:W - 40, 200 ), dbx:prevHost = V List Box( dbx:prevGrid = dbx:hint( "Click Preview to see the first 100 rows here." ) ) )
+			)
+		),
+
+		// Footer
+		Border Box( Left( 20 ), Right( 20 ), Top( 8 ), Bottom( 14 ),
+			H List Box(
+				dbx:status = Text Box( "", <<Set Width( dbx:W - 140 ), <<Text Color( dbx:muted ) ),
+				Button Box( "Close", dbx:win << Close Window )
+			)
+		)
+	)
+);
+
+dbx:clearTable();
+dbx:onMethod();
+dbx:onProfile();
+dbx:showScreen( 0 );
+dbx:setStatus( "Choose how to sign in, then click Sign in." );

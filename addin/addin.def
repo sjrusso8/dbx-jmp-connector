@@ -1,0 +1,4 @@
+id=com.databricks.jmp.connector
+name=Databricks Connector
+addinVersion=0.1
+MinJMPVersion=18
