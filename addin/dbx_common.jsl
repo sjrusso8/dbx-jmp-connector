@@ -1,6 +1,10 @@
 // Shared by databricks_connector.jsl (the window) and dbx_refresh.jsl (a data table's Refresh script).
 If( !Namespace Exists( "dbx" ), New Namespace( "dbx" ) ); // keep state: a refresh can run while the window is open
 
+// host|warehouse|sql of queries imported or confirmed this session; a refresh asks before running any other.
+If( !Is Associative Array( Try( dbx:trusted, 0 ) ), dbx:trusted = Associative Array() );
+dbx:trustKey = Function( {host, wh, sql}, host || "\!n" || wh || "\!n" || sql );
+
 dbx:addinDir = Try(
 	Convert File Path( "$ADDIN_HOME(com.databricks.jmp.connector)", Native ),
 	Convert File Path( Get Default Directory(), Native )
@@ -9,13 +13,19 @@ dbx:addinDir = Try(
 dbx:navy = RGB Color( 0.106, 0.192, 0.224 );
 dbx:lava = RGB Color( 1, 0.212, 0.129 );
 dbx:muted = RGB Color( 0.42, 0.45, 0.48 );
+dbx:line = RGB Color( 0.86, 0.89, 0.9 ); // section outlines
+dbx:green = RGB Color( 0, 0.6, 0.4 );
+dbx:amber = RGB Color( 0.78, 0.49, 0 );
 
 // fresh = 1 (window open): reload dbx_jmp and start a new log. fresh = 0 (refresh): keep the signed-in session.
-dbx:loadPython = Function( {fresh},
+dbx:loadPython = Function( {fresh}, {dbxDir},
+	// Sent, not pasted into the code: a Windows path ends in "\", which breaks a Python r"..." literal.
+	dbxDir = dbx:addinDir;
+	Python Send( dbxDir );
 	Python Submit( Eval Insert( "\[
 import sys, importlib, logging
-if r"^dbx:addinDir^" not in sys.path:
-    sys.path.insert(0, r"^dbx:addinDir^")
+if dbxDir not in sys.path:
+    sys.path.insert(0, dbxDir)
 try:
     import databricks.sdk, databricks.sql, pyarrow
     import dbx_jmp

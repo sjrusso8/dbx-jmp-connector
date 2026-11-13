@@ -2,6 +2,8 @@
 
 reference/
 .DS_Store
+.isaac/ 
+.spikes/
 
 
 # Byte-compiled / optimized / DLL files

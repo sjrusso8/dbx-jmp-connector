@@ -20,6 +20,30 @@ dbx:hint = Function( {txt}, Text Box( txt, <<Text Color( dbx:muted ) ) );
 
 dbx:colHeader = Function( {txt}, Text Box( txt, <<Set Font Style( "Bold" ), <<Text Color( dbx:muted ) ) );
 
+// A section with a light outline, so related controls read as one group. card adds a heading.
+dbx:panel = Function( {content}, Border Box( Left( 14 ), Right( 14 ), Top( 10 ), Bottom( 12 ), Sides( 15 ), <<Set Color( dbx:line ), content ) );
+
+dbx:card = Function( {title, content}, dbx:panel( V List Box( dbx:heading( title ), Spacer Box( Size( 0, 6 ) ), content ) ) );
+
+// Replace what a result panel (a V List Box inside a Scroll Box) shows.
+// Native boxes only: a Web Browser Box in the window takes ⌘C/⌘V from every text box on macOS.
+dbx:showIn = Function( {host, box},
+	Try( (host << Child) << Delete Box() );
+	host << Append( box );
+);
+
+// A status card: bold title (coloured by tone), text lines, warnings, then SQL in a fixed-width font.
+dbx:showCard = Function( {host, title, lines = {}, warnings = {}, code = {}, tone = "info"}, {head, box, w},
+	w = dbx:W - 140;
+	head = Text Box( title, <<Set Font Style( "Bold" ), <<Set Wrap( w ) );
+	If( tone != "info", head << Text Color( Match( tone, "ok", dbx:green, "warn", dbx:amber, dbx:lava ) ) );
+	box = V List Box( head );
+	For Each( {t}, lines, box << Append( Text Box( t, <<Set Wrap( w ) ) ) );
+	For Each( {t}, warnings, box << Append( Text Box( "⚠  " || t, <<Set Wrap( w ), <<Text Color( dbx:amber ) ) ) );
+	For Each( {t}, code, box << Append( Border Box( Top( 6 ), Text Box( t, <<Set Wrap( w ), <<Set Font( "Menlo" ) ) ) ) );
+	dbx:showIn( host, box );
+);
+
 dbx:typeNames = {"Auto", "Number", "Text", "Date", "Datetime"};
 dbx:opNames = {"=", "≠", ">", "≥", "<", "≤", "contains", "starts with", "in list", "is empty", "is not empty"};
 
@@ -75,6 +99,7 @@ dbx:connect = Function( {}, {m, args, r, wh},
 	r = dbx:call( "catalogs" );
 	If( Is Empty( r ), Return() );
 	dbx:catalogs << Set Items( r );
+	dbx:genieLoad();
 	dbx:showScreen( 1 );
 	dbx:setStatus( "Connected. Pick a table, or switch to Write SQL." );
 );
@@ -122,12 +147,15 @@ dbx:onTable = Function( {}, {t, r, cols},
 	r = dbx:call( "table", Associative Array( {"full_name"}, Eval List( {dbx:fullName} ) ) );
 	If( Is Empty( r ), dbx:fullName = ""; Return() );
 	cols = r["columns"];
-	// One row per column: {name, source type, include, import as, rename to}
-	dbx:cols = Transform Each( {c}, cols, Eval List( {c["name"], c["type"], 1, "Auto", ""} ) );
+	// One row per column: {name, source type, include, import as, rename to}. A metric view's type also shows its role.
+	dbx:cols = Transform Each( {c}, cols, Eval List( {c["name"], c["type"] || If( c["kind"] != "", "  · " || c["kind"], "" ), 1, "Auto", ""} ) );
+	dbx:measures = {};
+	For Each( {c}, cols, If( c["kind"] == "measure", Insert Into( dbx:measures, c["name"] ) ) );
 	dbx:tableName << Set Text( dbx:fullName );
 	dbx:tableMeta << Set Text(
 		r["type"] || "   ·   " || Char( N Items( cols ) ) || " columns" || If( r["owner"] != "", "   ·   Owner: " || r["owner"], "" )
 		|| If( r["comment"] != "", "\!n" || r["comment"], "" )
+		|| If( N Items( dbx:measures ), "\!nRows are grouped by the dimensions you include, and each measure is aggregated per group. Filters on measures apply to the groups.", "" )
 	);
 	dbx:renderCols();
 	dbx:renderFilters();
@@ -137,6 +165,7 @@ dbx:onTable = Function( {}, {t, r, cols},
 dbx:clearTable = Function( {},
 	dbx:fullName = "";
 	dbx:cols = {};
+	dbx:measures = {};
 	dbx:filters = {};
 	dbx:tableName << Set Text( "No table selected" );
 	dbx:tableMeta << Set Text( "Pick a catalog, schema, and table on the left." );
@@ -175,7 +204,7 @@ dbx:renderCols = Function( {}, {grid, i, row, inc, asB, alias},
 		grid << Append( asB );
 		grid << Append( alias );
 		grid << Append(
-			Eval( Substitute( Expr( H List Box( Button Box( "▲", dbx:moveCol( III, -1 ) ), Button Box( "▼", dbx:moveCol( III, 1 ) ) ) ), Expr( III ), i ) )
+			Eval( Substitute( Expr( H List Box( Button Box( "", dbx:moveCol( III, -1 ), <<Set Icon( "ListItemUp" ), <<Set Tip( "Move up" ) ), Button Box( "", dbx:moveCol( III, 1 ), <<Set Icon( "ListItemDown" ), <<Set Tip( "Move down" ) ) ) ), Expr( III ), i ) )
 		);
 	);
 	dbx:colsGrid << Delete Box();
@@ -234,7 +263,7 @@ dbx:renderFilters = Function( {}, {grid, i, row, colB, opB, val, names},
 		grid << Append( colB );
 		grid << Append( opB );
 		grid << Append( val );
-		grid << Append( Eval( Substitute( Expr( Button Box( "Remove", dbx:removeFilter( III ) ) ), Expr( III ), i ) ) );
+		grid << Append( Eval( Substitute( Expr( Button Box( "", dbx:removeFilter( III ), <<Set Icon( "ListItemRemove" ), <<Set Tip( "Remove this filter" ) ) ), Expr( III ), i ) ) );
 	);
 	dbx:filtGrid << Delete Box();
 	dbx:filtHost << Append( dbx:filtGrid = grid );
@@ -260,6 +289,57 @@ dbx:removeFilter = Function( {i},
 	dbx:renderFilters();
 );
 
+// ---------------------------------------------------------------- ask Genie
+
+dbx:genieLoad = Function( {}, {r},
+	r = dbx:call( "genie_spaces" );
+	dbx:genieIds = If( Is Empty( r ), {}, Transform Each( {g}, r, g["id"] ) );
+	dbx:genieSpace << Set Items( If( N Items( dbx:genieIds ), Transform Each( {g}, r, g["title"] ), {"(no Genie spaces)"} ) );
+	dbx:genieNew();
+);
+
+// Forget the conversation and answer: the next question starts fresh.
+dbx:genieNew = Function( {},
+	dbx:genieConv = "";
+	dbx:genieSql = "";
+	dbx:genieTitle = "";
+	dbx:genieSuggest << Set Items( {} );
+	dbx:showCard( dbx:genieHost, "Ask a question about your data", {"Genie answers with an explanation and the SQL it wrote. Preview and Import run that SQL on the SQL warehouse above."} );
+);
+
+dbx:genieAsk = Function( {}, {q, args, r},
+	If( !N Items( dbx:genieIds ), dbx:setStatus( "No Genie space available. Ask a workspace admin for access to one.", 1 ); Return() );
+	q = Trim( dbx:genieQ << Get Text );
+	If( q == "", dbx:setStatus( "Type a question first.", 1 ); Return() );
+	args = Associative Array( {"space_id", "question", "conversation_id"}, Eval List( {dbx:genieIds[dbx:genieSpace << Get], q, dbx:genieConv} ) );
+	dbx:setStatus( "Asking Genie… (usually 5 to 30 seconds)" );
+	r = dbx:call( "genie_ask", args );
+	If( Is Empty( r ),
+		dbx:showCard( dbx:genieHost, "Genie didn't answer", Eval List( {dbx:lastError} ), {}, {}, "error" );
+		Return();
+	);
+	dbx:genieConv = r["conversation_id"];
+	dbx:genieSql = r["sql"];
+	dbx:genieTitle = r["title"];
+	dbx:showCard( dbx:genieHost, If( r["title"] == "", q, r["title"] ), r["text"], {}, If( r["sql"] == "", {}, Eval List( {r["sql"]} ) ), If( r["sql"] == "", "warn", "info" ) );
+	dbx:genieSuggest << Set Items( r["suggestions"] );
+	dbx:genieQ << Set Text( "" );
+	dbx:setStatus( If( r["sql"] == "", "Genie answered without SQL. Rephrase or ask a follow-up.", "Genie wrote a query. Preview or Import runs it on your SQL warehouse; follow-up questions refine it." ) );
+);
+
+// A suggested follow-up goes into the question box; the user still clicks Ask.
+dbx:genieUseSuggestion = Function( {}, {s},
+	s = dbx:genieSuggest << Get Selected;
+	If( Is String( s ), dbx:genieQ << Set Text( s ) );
+);
+
+dbx:genieToSql = Function( {},
+	If( dbx:genieSql == "", dbx:setStatus( "Ask Genie a question first.", 1 ); Return() );
+	dbx:sqlBox << Set Text( dbx:genieSql );
+	If( dbx:genieTitle != "", dbx:queryName << Set Text( dbx:genieTitle ) );
+	dbx:tabs << Set Selected( 2 );
+);
+
 // ---------------------------------------------------------------- query, preview, import
 
 // The SQL for the active tab, capped at limit rows (0 = no cap). Returns {sql, table name} or Empty().
@@ -274,14 +354,20 @@ dbx:currentQuery = Function( {limit}, {cols, filters, sql, name},
 		);
 		If( !N Items( cols ), dbx:setStatus( "Include at least one column.", 1 ); Return( Empty() ) );
 		filters = Transform Each( {f}, dbx:filters, Associative Array( {"column", "op", "value"}, f ) );
-		sql = dbx:call( "build_sql", Associative Array( {"full_name", "columns", "filters", "limit"}, Eval List( {dbx:fullName, cols, filters, limit} ) ) );
+		sql = dbx:call( "build_sql", Associative Array( {"full_name", "columns", "filters", "limit", "measures"}, Eval List( {dbx:fullName, cols, filters, limit, dbx:measures} ) ) );
 		name = Words( dbx:fullName, "." )[3];
 	,
-		sql = Trim( dbx:sqlBox << Get Text );
-		If( sql == "", dbx:setStatus( "Write a SQL query first.", 1 ); Return( Empty() ) );
+		If( (dbx:tabs << Get Selected) == 2,
+			sql = Trim( dbx:sqlBox << Get Text );
+			If( sql == "", dbx:setStatus( "Write a SQL query first.", 1 ); Return( Empty() ) );
+			name = Trim( dbx:queryName << Get Text );
+			If( name == "", name = "Databricks query" );
+		,
+			sql = dbx:genieSql;
+			If( sql == "", dbx:setStatus( "Ask Genie a question first.", 1 ); Return( Empty() ) );
+			name = If( dbx:genieTitle == "", "Genie query", dbx:genieTitle );
+		);
 		sql = dbx:call( "limit_sql", Associative Array( {"sql", "limit"}, Eval List( {sql, limit} ) ) );
-		name = Trim( dbx:queryName << Get Text );
-		If( name == "", name = "Databricks query" );
 	);
 	If( Is Empty( sql ), Return( Empty() ) );
 	dbx:sqlShown << Set Text( sql );
@@ -299,15 +385,17 @@ dbx:preview = Function( {}, {q, wh, p, tb, i, dbxPrev},
 	If( Is Empty( q ) | Is Empty( wh ), Return() );
 	dbx:setStatus( "Running preview on " || dbx:selected( dbx:warehouse ) || "… (a stopped warehouse can take a minute to start)" );
 	p = dbx:call( "preview", Associative Array( {"warehouse_id", "sql"}, Eval List( {wh, q[1]} ) ) );
-	If( Is Empty( p ), Return() );
+	If( Is Empty( p ),
+		dbx:showCard( dbx:prevHost, "Preview didn't run", Eval List( {dbx:lastError} ), {}, {}, "error" );
+		Return();
+	);
 	Python Submit( "dbxPrev = dbx_jmp.preview_values" );
 	dbxPrev = Python Get( dbxPrev ); // a list of string lists, one per column
 	tb = Table Box( <<Set Shade Alternate Rows( 1 ), <<Set Underline Headings( 1 ), <<Set Column Borders( 1 ) );
 	For( i = 1, i <= N Items( p["columns"] ), i++,
 		tb << Append( String Col Box( p["columns"][i], dbxPrev[i] ) )
 	);
-	dbx:prevGrid << Delete Box();
-	dbx:prevHost << Append( dbx:prevGrid = tb );
+	dbx:showIn( dbx:prevHost, tb );
 	dbx:setStatus(
 		"Preview: " || Char( p["rows"] ) || " rows × " || Char( N Items( p["columns"] ) ) || " columns."
 	);
@@ -327,8 +415,204 @@ dbx:import = Function( {}, {q, wh, r, dt},
 	dt << New Table Variable( "Databricks Host", dbx:hostUrl );
 	dt << New Table Variable( "Databricks Warehouse", wh );
 	dt << New Table Variable( "Databricks Sign-in", dbx:signIn );
+	dbx:trusted[dbx:trustKey( dbx:hostUrl, wh, q[1] )] = 1; // you just ran it, so its refresh doesn't ask
 	dt << New Script( "Refresh from Databricks", Include( "$ADDIN_HOME(com.databricks.jmp.connector)/dbx_refresh.jsl" ) );
 	dbx:setStatus( "Imported " || Char( r["rows"] ) || " rows into data table \!"" || r["table"] || "\!"." );
+);
+
+// ---------------------------------------------------------------- publish to Unity Catalog
+
+dbx:modes = {"Create", "Append", "Overwrite", "Upsert"};
+dbx:modeTips = {
+	"Creates the table if it doesn't exist. If it does, rows are appended.",
+	"Adds rows. Columns must match the existing table.",
+	"Replaces all rows. You confirm first.",
+	"Tick the upsert key columns. Matching rows are updated, others inserted."
+};
+
+dbx:pubIntro = Function( {},
+	dbx:showCard( dbx:pubHost, "Review, then publish", {"Review shows the summary, warnings and the SQL that will run. Publish writes the rows."} )
+);
+
+// Open data tables go in the source combo. Picking one reads its columns and prefills the target.
+dbx:pubListTables = Function( {},
+	dbx:pubNames = Transform Each( {d}, Get Data Table List(), d << Get Name ); // the list holds tables, not names
+	dbx:pubSrc << Set Items( dbx:pubNames );
+	If( N Items( dbx:pubNames ), dbx:pubLoad() );
+);
+
+dbx:pubColumnInfo = Function( {name, col}, {note},
+	note = col << Get Property( "Notes" );
+	Associative Array( {"name", "data_type", "format", "notes"},
+		Eval List( {name, col << Get Data Type, Char( col << Get Format ), If( Is Empty( note ), "", note )} ) );
+);
+
+dbx:pubLoad = Function( {}, {dt, cols, n, cat, sch, r},
+	If( !N Items( dbx:pubNames ), Return() );
+	dbx:pubTable = dbx:pubNames[dbx:pubSrc << Get];
+	dt = Data Table( dbx:pubTable );
+	n = N Row( dt );
+	cat = dbx:selected( dbx:catalogs );
+	sch = dbx:selected( dbx:schemas );
+	dbx:pubTarget << Set Text(
+		If( (cat != "") & (sch != ""), cat || "." || sch || ".", "" )
+		|| Lowercase( Regex( dbx:pubTable, "[^A-Za-z0-9]+", "_", GLOBALREPLACE ) )
+	);
+	cols = Transform Each( {c}, dt << Get Column Names( String ), dbx:pubColumnInfo( c, Column( dt, c ) ) ); // String: plain names, not JSL name refs
+	r = dbx:call( "publish_columns", Associative Array( {"table", "columns"}, Eval List( {dbx:pubTable, cols} ) ) );
+	If( Is Empty( r ), Return() );
+	// Row: {JMP column, target, type, choices, include, dropped reason, notes, upsert key}
+	dbx:pubRows = Transform Each( {c}, r,
+		Eval List( {c["name"], c["target"], c["type"], If( N Items( c["choices"] ), c["choices"], {c["type"]} ), c["include"], c["dropped"], c["comment"], 0} )
+	);
+	dbx:pubRender();
+	dbx:pubBigHint << Set Text( If( n > 10000, "This table has " || Char( n ) || " rows. Fast write is quicker at this size.", "" ) );
+	dbx:pubIntro();
+	dbx:pubCheck();
+	dbx:setStatus( "Choose a target and a mode, then Review." );
+);
+
+dbx:pubCheck = Function( {}, {t, info},
+	t = Trim( dbx:pubTarget << Get Text );
+	If( t == "", Return() );
+	// The warehouse lets target_info count rows; without one it reports -1.
+	info = dbx:call( "target_info", Associative Array( {"full_name", "warehouse_id"}, Eval List( {t, If( N Items( dbx:whIds ), dbx:whIds[dbx:warehouse << Get], "" )} ) ) );
+	If( Is Empty( info ), Return() );
+	dbx:pubTarget << Set Text( info["full_name"] ); // a short name gets the workspace default catalog and schema
+	dbx:pubInfo << Set Text(
+		If( info["exists"],
+			"Exists" || If( info["owner"] != "", "   ·   Owner: " || info["owner"], "" )
+			|| If( info["rows"] >= 0, "   ·   " || Char( info["rows"] ) || " rows", "" )
+			|| If( info["comment"] != "", "\!n" || info["comment"], "" ),
+			"Not in Unity Catalog yet."
+		)
+	);
+);
+
+dbx:onPubMode = Function( {}, {up},
+	up = (dbx:pubMode << Get) == 4;
+	dbx:pubKeyHdr << Visibility( If( up, "Visible", "Collapse" ) );
+	For Each( {w}, dbx:pubKeyW, w << Visibility( If( up, "Visible", "Collapse" ) ) );
+	dbx:pubModeHint << Set Text( dbx:modeTips[dbx:pubMode << Get] );
+);
+
+dbx:pubRender = Function( {}, {grid, i, row, inc, tgt, typ, key},
+	dbx:pubIncW = {};
+	dbx:pubTgtW = {};
+	dbx:pubTypeW = {};
+	dbx:pubKeyW = {};
+	grid = Lineup Box( N Col( 6 ), Spacing( 12, 2 ) );
+	grid << Append( dbx:colHeader( "Include" ) );
+	grid << Append( dbx:colHeader( "JMP column" ) );
+	grid << Append( dbx:colHeader( "Target name" ) );
+	grid << Append( dbx:colHeader( "Type" ) );
+	grid << Append( dbx:pubKeyHdr = dbx:colHeader( "Upsert key" ) );
+	grid << Append( dbx:colHeader( "Not written" ) );
+	For( i = 1, i <= N Items( dbx:pubRows ), i++,
+		row = dbx:pubRows[i];
+		inc = Check Box( {""} );
+		inc << Set( 1, row[5] );
+		tgt = Text Edit Box( row[2], <<Set Width( 170 ) );
+		typ = Combo Box( row[4] );
+		typ << Set( Max( 1, Contains( row[4], row[3] ) ) );
+		key = Check Box( {""} );
+		key << Set( 1, row[8] );
+		Insert Into( dbx:pubIncW, inc );
+		Insert Into( dbx:pubTgtW, tgt );
+		Insert Into( dbx:pubTypeW, typ );
+		Insert Into( dbx:pubKeyW, key );
+		grid << Append( inc );
+		grid << Append( Text Box( row[1] ) );
+		grid << Append( tgt );
+		grid << Append( typ );
+		grid << Append( key );
+		grid << Append( Text Box( row[6], <<Text Color( dbx:muted ) ) );
+	);
+	dbx:pubGrid << Delete Box();
+	dbx:pubGridHost << Append( dbx:pubGrid = grid );
+	dbx:onPubMode();
+);
+
+// Read the grid widgets back into dbx:pubRows before anything uses them.
+dbx:pubSync = Function( {}, {i, row},
+	For( i = 1, i <= N Items( dbx:pubRows ), i++,
+		row = dbx:pubRows[i];
+		dbx:pubRows[i] = Eval List( {row[1], dbx:pubTgtW[i] << Get Text, row[4][dbx:pubTypeW[i] << Get], row[4], dbx:pubIncW[i] << Get( 1 ), row[6], row[7], dbx:pubKeyW[i] << Get( 1 )} );
+	)
+);
+
+// publish() arguments from the tab. dry = 1 for Review. Empty() if no table or warehouse.
+dbx:pubArgs = Function( {dry}, {args, keys, wh},
+	If( !N Items( dbx:pubRows ), dbx:setStatus( "Choose a source table first.", 1 ); Return( Empty() ) );
+	wh = dbx:warehouseId();
+	If( Is Empty( wh ), Return( Empty() ) );
+	dbx:pubSync();
+	keys = {};
+	For Each( {r}, dbx:pubRows, If( r[8], keys[N Items( keys ) + 1] = r[2] ) );
+	args = Associative Array();
+	args["table"] = dbx:pubTable;
+	args["target"] = Trim( dbx:pubTarget << Get Text );
+	args["mode"] = Lowercase( dbx:modes[dbx:pubMode << Get] );
+	args["columns"] = Transform Each( {r}, dbx:pubRows,
+		Associative Array( {"name", "target", "type", "include", "comment"}, Eval List( {r[1], r[2], r[3], r[5], r[7]} ) )
+	);
+	args["keys"] = keys;
+	args["fast_write"] = dbx:pubFast << Get( 1 );
+	args["volume"] = Trim( dbx:pubVolume << Get Text );
+	args["comment"] = Trim( dbx:pubComment << Get Text );
+	args["include_excluded"] = dbx:pubExcl << Get( 1 );
+	args["excluded_rows"] = As List( Data Table( dbx:pubTable ) << Get Excluded Rows() );
+	args["dry_run"] = dry;
+	args["warehouse_id"] = wh;
+	args["host"] = dbx:hostUrl;
+	args["sign_in"] = dbx:signIn;
+	args
+);
+
+dbx:pubCall = Function( {args}, {r},
+	r = dbx:call( "publish", args );
+	If( Is Empty( r ), dbx:showCard( dbx:pubHost, "Publish didn't finish", Eval List( {dbx:lastError} ), {}, {}, "error" ) );
+	r
+);
+
+dbx:pubReview = Function( {}, {args, r},
+	args = dbx:pubArgs( 1 );
+	If( Is Empty( args ), Return() );
+	r = dbx:pubCall( args );
+	If( Is Empty( r ), Return() );
+	dbx:showCard( dbx:pubHost, r["summary"], {"Nothing is written yet. Click Publish to write the rows."}, r["warnings"], r["sql"], If( N Items( r["warnings"] ), "warn", "info" ) );
+	dbx:setStatus( "Nothing is written yet. Click Publish to write the rows." );
+);
+
+dbx:pubGo = Function( {}, {args, info, answer, r, dt},
+	args = dbx:pubArgs( 0 );
+	If( Is Empty( args ), Return() );
+	If( args["mode"] == "overwrite",
+		info = dbx:call( "target_info", Associative Array( {"full_name", "warehouse_id"}, Eval List( {args["target"], args["warehouse_id"]} ) ) );
+		If( Is Empty( info ), Return() );
+		If( info["exists"],
+			answer = New Window( "Overwrite table", <<Modal,
+				Text Box( "Overwrite " || info["full_name"] || "?", <<Set Font Style( "Bold" ) ),
+				Text Box( "The " || If( info["rows"] >= 0, Char( info["rows"] ) || " current rows", "current rows" ) || " in this table will be replaced by the rows in this data table.", <<Set Wrap( 460 ) ),
+				H List Box( Button Box( "Overwrite" ), Button Box( "Cancel" ) )
+			);
+			If( answer["Button"] != 1, Return() );
+		);
+	);
+	r = dbx:pubCall( args );
+	If( Is Empty( r ), Return() );
+	dbx:pubUrl = r["url"];
+	dbx:pubLink << Visibility( "Visible" );
+	// The recipe re-runs this publish from the data table (no token: sign-in is the same saved method as Refresh).
+	dt = Data Table( args["table"] );
+	args["target"] = r["target"]; // the full name, so the recipe doesn't depend on the workspace default
+	dt << Set Table Variable( "Databricks Publish Recipe", As JSON Expr( args ) );
+	dt << New Script( "Publish to Unity Catalog", Include( "$ADDIN_HOME(com.databricks.jmp.connector)/dbx_publish.jsl" ) );
+	dbx:showCard( dbx:pubHost, "Published " || Char( r["rows_written"] ) || " rows to " || args["target"],
+		Eval List( {"Delta version " || Char( r["table_version"] ) || " (was " || Char( r["version_before"] ) || ").", "The publish recipe is saved in this data table."} ),
+		r["warnings"], {}, "ok"
+	);
+	dbx:setStatus( "Published. The publish recipe is saved in this data table." );
 );
 
 // ---------------------------------------------------------------- window
@@ -339,11 +623,19 @@ If( Is Empty( dbx:profiles ), dbx:profiles = {} );
 dbx:whIds = {};
 dbx:fullName = "";
 dbx:cols = {};
+dbx:measures = {};
 dbx:filters = {};
+dbx:pubRows = {};
+dbx:genieIds = {};
+dbx:genieConv = "";
+dbx:genieSql = "";
+dbx:genieTitle = "";
+dbx:pubNames = {};
+dbx:pubTable = "";
+dbx:pubUrl = "";
 dbx:W = 1120; // content width
 
 dbx:win = New Window( "Databricks Connector",
-	Show Menu( 0 ),
 	Show Toolbars( 0 ),
 	V List Box(
 		// Header band
@@ -407,71 +699,168 @@ dbx:win = New Window( "Databricks Connector",
 			V List Box(
 				H List Box(
 					dbx:label( "SQL warehouse" ),
-					dbx:warehouse = Combo Box( {} ),
+					dbx:warehouse = Combo Box( {}, <<Set Tip( "Runs previews, imports and publishes. A stopped warehouse starts on first use." ) ),
 					Spacer Box( Size( 24, 0 ) ),
-					Button Box( "Switch workspace", dbx:disconnect() )
+					Button Box( "Switch workspace", dbx:disconnect(), <<Set Tip( "Sign out and choose another workspace or sign-in method" ) )
 				),
 				Spacer Box( Size( 0, 10 ) ),
-				dbx:tabs = Tab Box(
-					Tab Page Box( "Select data",
-						Border Box( Top( 10 ), Bottom( 6 ),
-							H List Box(
-								V List Box(
-									dbx:heading( "Catalog explorer" ),
-									Spacer Box( Size( 0, 6 ) ),
+				// Outer tabs: the Row limit / Preview / Import strip belongs to Get data only.
+				Tab Box(
+					Tab Page Box( "Get data",
+						V List Box(
+							dbx:tabs = Tab Box(
+							Tab Page Box( "Select data",
+								Border Box( Top( 10 ), Bottom( 6 ),
 									H List Box(
-										V List Box( dbx:label( "Catalog" ), dbx:catalogs = List Box( {}, width( 150 ), maxSelected( 1 ), nlines( 15 ), dbx:onCatalog() ) ),
-										Spacer Box( Size( 6, 0 ) ),
-										V List Box( dbx:label( "Schema" ), dbx:schemas = List Box( {}, width( 150 ), maxSelected( 1 ), nlines( 15 ), dbx:onSchema() ) ),
-										Spacer Box( Size( 6, 0 ) ),
-										V List Box( dbx:label( "Table" ), dbx:tables = List Box( {}, width( 170 ), maxSelected( 1 ), nlines( 15 ), dbx:onTable() ) )
+										dbx:card( "Catalog explorer",
+											H List Box(
+												V List Box( dbx:label( "Catalog" ), dbx:catalogs = List Box( {}, width( 145 ), maxSelected( 1 ), nlines( 15 ), dbx:onCatalog() ) ),
+												Spacer Box( Size( 6, 0 ) ),
+												V List Box( dbx:label( "Schema" ), dbx:schemas = List Box( {}, width( 145 ), maxSelected( 1 ), nlines( 15 ), dbx:onSchema() ) ),
+												Spacer Box( Size( 6, 0 ) ),
+												V List Box( dbx:label( "Table" ), dbx:tables = List Box( {}, width( 160 ), maxSelected( 1 ), nlines( 15 ), dbx:onTable() ) )
+											)
+										),
+										Spacer Box( Size( 12, 0 ) ),
+										dbx:panel(
+											V List Box(
+												dbx:tableName = Text Box( "", <<Set Font Size( 13 ), <<Set Font Style( "Bold" ) ),
+												dbx:tableMeta = Text Box( "", <<Set Wrap( 540 ), <<Text Color( dbx:muted ) ),
+												Spacer Box( Size( 0, 8 ) ),
+												H List Box(
+													dbx:heading( "Columns" ),
+													Spacer Box( Size( 16, 0 ) ),
+													Button Box( "Select all", dbx:setAllCols( 1 ), <<Set Tip( "Include every column" ) ),
+													Button Box( "Select none", dbx:setAllCols( 0 ), <<Set Tip( "Clear every Include box" ) )
+												),
+												Scroll Box( Size( 540, 170 ), dbx:colsHost = V List Box( dbx:colsGrid = Text Box( "" ) ) ),
+												Spacer Box( Size( 0, 8 ) ),
+												H List Box(
+													dbx:heading( "Filters" ),
+													Spacer Box( Size( 16, 0 ) ),
+													Button Box( "Add filter", dbx:addFilter(), <<Set Icon( "ListItemAdd" ), <<Set Tip( "Add a WHERE condition on a column" ) )
+												),
+												Scroll Box( Size( 540, 80 ), dbx:filtHost = V List Box( dbx:filtGrid = Text Box( "" ) ) )
+											)
+										)
 									)
-								),
-								Spacer Box( Size( 20, 0 ) ),
-								V List Box(
-									dbx:tableName = Text Box( "", <<Set Font Size( 13 ), <<Set Font Style( "Bold" ) ),
-									dbx:tableMeta = Text Box( "", <<Set Wrap( 560 ), <<Text Color( dbx:muted ) ),
-									Spacer Box( Size( 0, 8 ) ),
-									H List Box(
-										dbx:heading( "Columns" ),
-										Spacer Box( Size( 16, 0 ) ),
-										Button Box( "Select all", dbx:setAllCols( 1 ) ),
-										Button Box( "Select none", dbx:setAllCols( 0 ) )
-									),
-									Scroll Box( Size( 580, 170 ), dbx:colsHost = V List Box( dbx:colsGrid = Text Box( "" ) ) ),
-									Spacer Box( Size( 0, 8 ) ),
-									H List Box( dbx:heading( "Filters" ), Spacer Box( Size( 16, 0 ) ), Button Box( "+ Add filter", dbx:addFilter() ) ),
-									Scroll Box( Size( 580, 80 ), dbx:filtHost = V List Box( dbx:filtGrid = Text Box( "" ) ) )
+								)
+							),
+							Tab Page Box( "Write SQL",
+								Border Box( Top( 10 ), Bottom( 6 ),
+									V List Box(
+										H List Box(
+											dbx:label( "Query name" ),
+											dbx:queryName = Text Edit Box( "", <<Set Width( 320 ), <<Set Hint( "Name for the new data table" ) )
+										),
+										Spacer Box( Size( 0, 8 ) ),
+										dbx:sqlBox = Script Box( "SELECT *\!nFROM samples.nyctaxi.trips", "SQL", dbx:W - 60, 290 )
+									)
+								)
+							),
+							Tab Page Box( "Ask Genie",
+								Border Box( Top( 10 ), Bottom( 6 ),
+									V List Box(
+										H List Box(
+											dbx:label( "Genie space" ),
+											dbx:genieSpace = Combo Box( {}, dbx:genieNew(), <<Set Tip( "A curated set of tables Genie answers from. Changing it starts a new conversation." ) ),
+											Button Box( "", dbx:genieLoad(), <<Set Icon( "Refresh" ), <<Set Tip( "Reload the Genie spaces" ) ),
+											Spacer Box( Size( 24, 0 ) ),
+											Button Box( "New conversation", dbx:genieNew(), <<Set Tip( "Forget earlier questions; the next one starts fresh" ) )
+										),
+										Spacer Box( Size( 0, 8 ) ),
+										H List Box(
+											dbx:label( "Question" ),
+											dbx:genieQ = Text Edit Box( "", <<Set Width( dbx:W - 300 ), <<Set N Lines( 2 ), <<Set Hint( "e.g. Average trip fare by pickup zip code last month" ) ),
+											Button Box( "Ask", dbx:genieAsk(), <<Set Icon( "Next" ), <<Set Tip( "Send the question to Genie. Follow-ups build on the earlier answers." ) )
+										),
+										Spacer Box( Size( 0, 8 ) ),
+										Scroll Box( Size( dbx:W - 60, 200 ), dbx:genieHost = V List Box( Text Box( "" ) ) ),
+										Spacer Box( Size( 0, 6 ) ),
+										H List Box(
+											dbx:label( "Follow-ups" ),
+											dbx:genieSuggest = Combo Box( {}, dbx:genieUseSuggestion(), <<Set Tip( "Genie's suggested next questions. Picking one puts it in the question box." ) ),
+											Spacer Box( Size( 24, 0 ) ),
+											Button Box( "Edit in Write SQL", dbx:genieToSql(), <<Set Tip( "Copy Genie's SQL to the Write SQL tab to change it" ) )
+										)
+									)
 								)
 							)
+						),
+						Spacer Box( Size( 0, 10 ) ),
+						H List Box(
+							dbx:label( "Row limit" ),
+							dbx:limit = Number Edit Box( 100000, 10, <<Set Tip( "Most rows to import. 0 imports every row." ) ),
+							dbx:hint( "   0 = all rows" ),
+							Spacer Box( Size( dbx:W - 600, 0 ) ),
+							Button Box( "Preview", dbx:preview(), <<Set Icon( "Find" ), <<Set Tip( "Show the first 100 rows below. Nothing is imported." ) ),
+							Button Box( "Import into JMP", dbx:import(), <<Set Icon( "DataTableSmall" ), <<Set Tip( "Run the query and open the rows as a new data table" ) )
+						),
+						Spacer Box( Size( 0, 10 ) ),
+						dbx:card( "Preview",
+							V List Box(
+								dbx:sqlShown = Text Box( "", <<Set Wrap( dbx:W - 110 ), <<Text Color( dbx:muted ) ),
+								Scroll Box( Size( dbx:W - 110, 230 ), dbx:prevHost = V List Box( Text Box( "" ) ) )
+							)
+						)
 						)
 					),
-					Tab Page Box( "Write SQL",
+					Tab Page Box( "Publish",
 						Border Box( Top( 10 ), Bottom( 6 ),
 							V List Box(
-								H List Box(
-									dbx:label( "Query name" ),
-									dbx:queryName = Text Edit Box( "", <<Set Width( 320 ), <<Set Hint( "Name for the new data table" ) )
+								dbx:card( "Source and target",
+									V List Box(
+										H List Box(
+											dbx:label( "Source table" ),
+											dbx:pubSrc = Combo Box( {}, dbx:pubLoad() ),
+											Button Box( "", dbx:pubListTables(), <<Set Icon( "Refresh" ), <<Set Tip( "Reload the list of open data tables" ) ),
+											Spacer Box( Size( 24, 0 ) ),
+											dbx:label( "Target" ),
+											dbx:pubTarget = Text Edit Box( "", <<Set Width( 360 ), <<Set Hint( "catalog.schema.table" ) ),
+											Button Box( "Check", dbx:pubCheck(), <<Set Icon( "Search" ), <<Set Tip( "Look up the target's owner, comment and row count" ) )
+										),
+										H List Box( dbx:label( "" ), dbx:pubInfo = dbx:hint( "" ) ),
+										Spacer Box( Size( 0, 6 ) ),
+										H List Box(
+											dbx:label( "Write mode" ),
+											dbx:pubMode = Combo Box( dbx:modes, dbx:onPubMode() ),
+											Spacer Box( Size( 12, 0 ) ),
+											dbx:pubModeHint = dbx:hint( "" )
+										)
+									)
 								),
 								Spacer Box( Size( 0, 8 ) ),
-								dbx:sqlBox = Script Box( "SELECT *\!nFROM samples.nyctaxi.trips", "SQL", dbx:W - 60, 290 )
+								dbx:card( "Options",
+									V List Box(
+										H List Box(
+											dbx:pubFast = Check Box( {"Fast write"}, <<Set Tip( "Upload one Parquet file to a volume, then load it in one statement" ) ),
+											dbx:hint( "   Volume:" ),
+											dbx:pubVolume = Text Edit Box( "", <<Set Width( 300 ), <<Set Hint( "/Volumes/catalog/schema/volume/folder/" ) )
+										),
+										dbx:pubBigHint = dbx:hint( "" ),
+										Spacer Box( Size( 0, 6 ) ),
+										H List Box(
+											dbx:pubExcl = Check Box( {"Include excluded rows"} ),
+											Spacer Box( Size( 24, 0 ) ),
+											dbx:label( "Table comment" ),
+											dbx:pubComment = Text Edit Box( "", <<Set Width( 360 ), <<Set Hint( "Shown in Catalog Explorer" ) )
+										)
+									)
+								),
+								Spacer Box( Size( 0, 8 ) ),
+								dbx:card( "Columns", Scroll Box( Size( dbx:W - 90, 150 ), dbx:pubGridHost = V List Box( dbx:pubGrid = Text Box( "" ) ) ) ),
+								Spacer Box( Size( 0, 8 ) ),
+								H List Box(
+									Button Box( "Review", dbx:pubReview(), <<Set Icon( "Find" ), <<Set Tip( "Show the summary, warnings and SQL. Nothing is written." ) ),
+									Button Box( "Publish", dbx:pubGo(), <<Set Icon( "Save" ), <<Set Tip( "Write the rows to Unity Catalog" ) ),
+									dbx:pubLink = Button Box( "Open in Catalog Explorer", Web( dbx:pubUrl ), <<Set Icon( "ProjectWebBrowser" ), <<Visibility( "Collapse" ) )
+								),
+								Spacer Box( Size( 0, 6 ) ),
+								Scroll Box( Size( dbx:W - 60, 150 ), dbx:pubHost = V List Box( Text Box( "" ) ) )
 							)
 						)
 					)
-				),
-				Spacer Box( Size( 0, 10 ) ),
-				H List Box(
-					dbx:label( "Row limit" ),
-					dbx:limit = Number Edit Box( 100000, 10 ),
-					dbx:hint( "   0 = all rows" ),
-					Spacer Box( Size( dbx:W - 560, 0 ) ),
-					Button Box( "Preview", dbx:preview() ),
-					Button Box( "Import into JMP", dbx:import() )
-				),
-				Spacer Box( Size( 0, 10 ) ),
-				H List Box( dbx:heading( "Preview" ), dbx:hint( "   first 100 rows" ) ),
-				dbx:sqlShown = Text Box( "", <<Set Wrap( dbx:W - 60 ), <<Text Color( dbx:muted ) ),
-				Scroll Box( Size( dbx:W - 40, 200 ), dbx:prevHost = V List Box( dbx:prevGrid = dbx:hint( "Click Preview to see the first 100 rows here." ) ) )
+				)
 			)
 		),
 
@@ -490,3 +879,8 @@ dbx:onMethod();
 dbx:onProfile();
 dbx:showScreen( 0 );
 dbx:setStatus( "Choose how to sign in, then click Sign in." );
+dbx:genieNew();
+dbx:showCard( dbx:prevHost, "No preview yet", {"Click Preview to see the first 100 rows here. Nothing is imported until you click Import into JMP."} );
+dbx:pubIntro();
+dbx:pubRender();
+dbx:pubListTables();

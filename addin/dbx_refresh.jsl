@@ -13,6 +13,19 @@ args["warehouse_id"] = dt << Get Table Variable( "Databricks Warehouse" );
 args["sql"] = dt << Get Table Variable( "Databricks Source" );
 args["sign_in"] = dt << Get Table Variable( "Databricks Sign-in" );
 
+// A shared .jmp file can carry any SQL: show it before it runs with your sign-in.
+key = dbx:trustKey( args["host"], args["warehouse_id"], args["sql"] );
+If( !Contains( dbx:trusted, key ),
+	answer = New Window( "Refresh from Databricks", <<Modal,
+		Text Box( "Run this query with your Databricks sign-in?", <<Set Font Style( "Bold" ) ),
+		Text Box( "Workspace: " || args["host"] || "\!nWarehouse: " || args["warehouse_id"], <<Set Wrap( 460 ) ),
+		Text Box( args["sql"], <<Set Wrap( 460 ), <<Set Font( "Courier New" ) ),
+		H List Box( Button Box( "Run" ), Button Box( "Cancel" ) )
+	);
+	If( answer["Button"] != 1, Stop() );
+	dbx:trusted[key] = 1;
+);
+
 r = dbx:call( "refresh_table", args );
 If( Is Empty( r ),
 	answer = New Window( "Refresh from Databricks", <<Modal,

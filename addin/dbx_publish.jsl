@@ -1,0 +1,39 @@
+// "Publish to Unity Catalog" table script: repeat the saved publish (Databricks Publish Recipe) from this data table.
+// Rows are written by publish() in Python; a failure reports what was written and how to restore.
+Names Default To Here( 1 );
+Include( "dbx_common.jsl" );
+
+dt = Current Data Table();
+If( !dbx:ensurePython( 0 ), Stop() );
+
+args = Parse JSON( dt << Get Table Variable( "Databricks Publish Recipe" ) );
+args["table"] = dt << Get Name; // use the table's current name, and its current excluded rows
+args["excluded_rows"] = As List( dt << Get Excluded Rows() );
+// Always ask: a shared .jmp file's recipe would otherwise write with your rights in one click.
+n = N Rows( dt ) - If( args["include_excluded"], 0, N Items( args["excluded_rows"] ) );
+verb = Uppercase( Substr( args["mode"], 1, 1 ) ) || Substr( args["mode"], 2 ); // "Append"
+answer = New Window( "Publish to Unity Catalog", <<Modal,
+	Text Box(
+		If( args["mode"] == "overwrite",
+			"Replace every row in " || args["target"] || " with the " || Char( n ) || " rows in this data table?",
+			verb || " " || Char( n ) || " rows to " || args["target"] || "?"
+		),
+		<<Set Wrap( 460 )
+	),
+	Text Box( "Workspace: " || args["host"], <<Set Wrap( 460 ) ),
+	H List Box( Button Box( verb ), Button Box( "Cancel" ) )
+);
+If( answer["Button"] != 1, Stop() );
+
+r = dbx:call( "publish", args );
+If( Is Empty( r ),
+	answer = New Window( "Publish to Unity Catalog", <<Modal,
+		Text Box( "This publish didn't finish.", <<Set Font Style( "Bold" ) ),
+		Text Box( dbx:lastError, <<Set Wrap( 460 ) ),
+		Text Box( "If your sign-in expired, sign in again, then run Publish to Unity Catalog again.", <<Set Wrap( 460 ) ),
+		H List Box( Button Box( "Sign in…" ), Button Box( "Cancel" ) )
+	);
+	If( answer["Button"] == 1, Include( "databricks_connector.jsl" ) );
+,
+	Write( "\!nDatabricks Connector: published " || Char( r["rows_written"] ) || " rows, Delta version " || Char( r["table_version"] ) || "." );
+);
