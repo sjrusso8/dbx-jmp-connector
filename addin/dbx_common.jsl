@@ -71,6 +71,20 @@ dbx:call = Function( {fn, args = Associative Array()}, {dbxArgs, res},
 	);
 );
 
+// Modal question; returns 1 if okLabel was clicked. JMP closes a modal only for OK, Yes, No or Cancel
+// buttons, so the okLabel button records the answer and closes the window itself.
+dbx:confirm = Function( {title, content, okLabel},
+	dbx:confirmed = 0;
+	New Window( title, <<Modal,
+		content,
+		H List Box(
+			Button Box( okLabel, <<Set Function( Function( {this}, dbx:confirmed = 1; (this << Top Parent) << Close Window ) ) ),
+			Button Box( "Cancel" )
+		)
+	);
+	dbx:confirmed;
+);
+
 dbx:setStatus = Function( {msg, isError = 0},
 	// No window (or it was closed), e.g. during a table refresh: write to the JMP log instead.
 	Try(

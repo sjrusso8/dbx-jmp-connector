@@ -584,19 +584,22 @@ dbx:pubReview = Function( {}, {args, r},
 	dbx:setStatus( "Nothing is written yet. Click Publish to write the rows." );
 );
 
-dbx:pubGo = Function( {}, {args, info, answer, r, dt},
+dbx:pubGo = Function( {}, {args, info, r, dt},
 	args = dbx:pubArgs( 0 );
 	If( Is Empty( args ), Return() );
 	If( args["mode"] == "overwrite",
 		info = dbx:call( "target_info", Associative Array( {"full_name", "warehouse_id"}, Eval List( {args["target"], args["warehouse_id"]} ) ) );
 		If( Is Empty( info ), Return() );
 		If( info["exists"],
-			answer = New Window( "Overwrite table", <<Modal,
-				Text Box( "Overwrite " || info["full_name"] || "?", <<Set Font Style( "Bold" ) ),
-				Text Box( "The " || If( info["rows"] >= 0, Char( info["rows"] ) || " current rows", "current rows" ) || " in this table will be replaced by the rows in this data table.", <<Set Wrap( 460 ) ),
-				H List Box( Button Box( "Overwrite" ), Button Box( "Cancel" ) )
+			If( !dbx:confirm( "Overwrite table",
+					V List Box(
+						Text Box( "Overwrite " || info["full_name"] || "?", <<Set Font Style( "Bold" ) ),
+						Text Box( "The " || If( info["rows"] >= 0, Char( info["rows"] ) || " current rows", "current rows" ) || " in this table will be replaced by the rows in this data table.", <<Set Wrap( 460 ) )
+					),
+					"Overwrite"
+				),
+				Return()
 			);
-			If( answer["Button"] != 1, Return() );
 		);
 	);
 	r = dbx:pubCall( args );

@@ -684,6 +684,13 @@ def test_jsl_no_missing_separators():
             )
 
 
+def test_jsl_buttons_without_a_script_can_close_a_modal():
+    """JMP closes a modal only for OK, Yes, No or Cancel; any other button needs a script (see dbx:confirm)."""
+    for f in (Path(__file__).parents[1] / "addin").glob("*.jsl"):
+        for label in re.findall(r'Button Box\(\s*"([^"]*)"\s*\)', f.read_text()):
+            assert label in ("OK", "Yes", "No", "Cancel"), f"{f.name}: {label}"
+
+
 def test_last_used_warehouse_is_listed_first(monkeypatch):
     import types
 
