@@ -54,6 +54,17 @@ The new data table has a **Refresh from Databricks** script. Run it to update th
 - **Browser sign-in (OAuth):** enter the workspace URL. A browser window opens for single sign-on.
 - **Personal access token:** enter the workspace URL and a token.
 
+If your token is scoped, choose **Other APIs** when you create it and add the scopes for the features you use. The **BI Tools** preset gives only `sql`, so browsing catalogs, Genie and Fast write fail with it. A token with full workspace access (`all-apis`) needs nothing extra.
+
+| Scope | Needed for |
+| --- | --- |
+| `sql` | Listing warehouses, and every query and write (preview, import, Write SQL, refresh, publish) |
+| `unity-catalog` | Browsing catalogs, schemas and tables, and checking the target table when publishing |
+| `genie` | Ask Genie |
+| `files` | Fast write, which uploads a temporary file to a volume and deletes it afterwards |
+
+Scopes only decide which APIs the token can call. You still need the warehouse and Unity Catalog permissions in [Before you start](#before-you-start).
+
 You can paste a full browser URL; the connector keeps only `https://<host>`. **Switch workspace** signs out and returns to this screen.
 
 ### 2. Pick a warehouse
@@ -145,6 +156,7 @@ You can share a data table made by the connector like any .jmp file. Things to k
 | Sign-in fails with a certificate or SSL error | A proxy replaces HTTPS certificates | Ask IT for the proxy's CA certificate file. Set both `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` to its path, then restart JMP. |
 | "Not signed in to <host>" on refresh | PAT table, or no saved sign-in | Click **Sign in…**, sign in to that workspace, then refresh again. |
 | "Profile 'X' is for …, not …" | Your profile with that name points at another workspace | Click **Sign in…** and sign in to the workspace shown. |
+| An error names a missing scope | Your personal access token is scoped and lacks it | Add the scope to the token (see [Sign in](#1-sign-in)). Scope changes can take up to ten minutes to apply. |
 | A query fails with a permission error | Missing warehouse or Unity Catalog permission | See [Before you start](#before-you-start), and ask the data owner. |
 | An import hangs at the download step | Your network blocks direct cloud-storage downloads (firewall or private link) | Ask your Databricks admin. Smaller results (row limit, fewer columns) may still work. |
 | "Column 'x' changed type in Databricks" | The source table changed | Import the table again. |
