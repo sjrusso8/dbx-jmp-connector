@@ -18,8 +18,6 @@ Building or changing the add-in? See [DEVELOPMENT.md](DEVELOPMENT.md).
 
 3. The first time, the connector asks to install its Python packages. Click **OK** and wait about a minute.
 
-   ![Install Python packages](docs/img/03-python-packages.png)
-
 4. Sign in: pick a saved profile, sign in with your browser, or paste a personal access token. Click **Sign in**.
 
    ![Sign in selection](docs/img/04-sign-in-dropdown.png)
@@ -89,7 +87,7 @@ The warehouse you used last in this workspace is listed first, then running ones
 
 **Ask Genie:** pick a Genie space and ask a question in plain words, for example *"Average cycle time by line for last month"*. Genie's answer and its SQL appear below. Ask follow-ups to refine it, or click one of Genie's **Follow-ups**. **New conversation** starts over. If the SQL is almost right, **Edit in Write SQL** copies it there so you can change it. Answers take about 5–30 seconds.
 
-![Ask Genie](docs/img/10-genie.png)
+![Ask Genie](docs/img/10-ask-genie.png)
 
 Genie's SQL runs on the warehouse you picked, not Genie's own.
 
@@ -164,8 +162,6 @@ You can share a data table made by the connector like any .jmp file. Things to k
 | JMP stops responding during a query | Normal: JMP waits for the query | Wait. Use the row limit or filters for large tables. |
 
 **The log** has the details of every call: `~/Library/Logs/DatabricksConnector.log` on macOS, `%LOCALAPPDATA%\DatabricksConnector.log` on Windows. Errors also show in red in the connector's status bar, or in a dialog when a table's Refresh or Publish script fails.
-
-**Getting help:** post in <!-- TODO: support channel --> with what you did, the error text, and the log file.
 
 ## Security
 
